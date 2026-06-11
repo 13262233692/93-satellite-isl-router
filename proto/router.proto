@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package satellite_isl;
+
+option go_package = "satellite-isl-router/proto";
+
+service RouterService {
+  rpc FindPath(PathRequest) returns (PathResponse) {}
+  rpc GetTopologyInfo(TopologyInfoRequest) returns (TopologyInfoResponse) {}
+  rpc GetSatellitePosition(SatellitePositionRequest) returns (SatellitePositionResponse) {}
+}
+
+message PathRequest {
+  uint64 source_satellite_id = 1;
+  uint64 destination_satellite_id = 2;
+  uint64 request_id = 3;
+  bool prefer_min_hops = 4;
+}
+
+message PathHop {
+  uint64 satellite_id = 1;
+  int32 hop_index = 2;
+  double link_distance_km = 3;
+  double propagation_delay_ms = 4;
+}
+
+message PathResponse {
+  uint64 request_id = 1;
+  bool path_found = 2;
+  repeated PathHop path = 3;
+  int32 total_hops = 4;
+  double total_distance_km = 5;
+  double total_propagation_delay_ms = 6;
+  uint64 snapshot_epoch = 7;
+  int64 compute_time_ns = 8;
+  string error_message = 9;
+}
+
+message TopologyInfoRequest {
+  uint64 request_id = 1;
+}
+
+message TopologyInfoResponse {
+  uint64 request_id = 1;
+  uint64 snapshot_epoch = 2;
+  int32 total_satellites = 3;
+  int32 total_links = 4;
+  double avg_degree = 5;
+  int64 topology_build_time_ns = 6;
+}
+
+message SatellitePositionRequest {
+  uint64 satellite_id = 1;
+  uint64 request_id = 2;
+}
+
+message SatellitePositionResponse {
+  uint64 request_id = 1;
+  uint64 satellite_id = 2;
+  double x_km = 3;
+  double y_km = 4;
+  double z_km = 5;
+  double altitude_km = 6;
+  uint64 snapshot_epoch = 7;
+}
