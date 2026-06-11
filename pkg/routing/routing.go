@@ -3,6 +3,7 @@ package routing
 import (
 	"container/heap"
 	"math"
+	"sync"
 
 	"satellite-isl-router/pkg/ephemeris"
 	"satellite-isl-router/pkg/topology"
@@ -14,11 +15,10 @@ const (
 )
 
 type HeapNode struct {
-	SatIndex   int
-	F          float64
-	G          float64
-	Hops       int
-	InsertSeq  uint64
+	SatIndex  int
+	F         float64
+	G         float64
+	InsertSeq uint64
 }
 
 type PriorityQueue struct {
@@ -49,76 +49,69 @@ func (pq *PriorityQueue) Pop() interface{} {
 }
 
 type RouteResult struct {
-	Found               bool
-	PathSatIndices      []int
-	PathSatIDs          []uint64
-	TotalHops           int
-	TotalDistanceKm     float64
+	Found                   bool
+	PathSatIndices          []int
+	PathSatIDs              []uint64
+	TotalHops               int
+	TotalDistanceKm         float64
 	TotalPropagationDelayMs float64
-	LinkDistancesKm     []float64
-	LinkDelaysMs        []float64
+	LinkDistancesKm         []float64
+	LinkDelaysMs            []float64
 }
 
-type Router struct {
-	g             *topology.Graph
-	distPool      *distSlicePool
-	parentPool    *parentSlicePool
-	visitedPool   *visitedSlicePool
-}
-
-type distSlicePool struct {
-	pool [][]float64
-	size int
-}
-
-func newDistSlicePool(size int) *distSlicePool {
-	return &distSlicePool{
-		pool: make([][]float64, 0, 1024),
-		size: size,
+var (
+	distPool = sync.Pool{
+		New: func() interface{} {
+			return make([]float64, 0, 10240)
+		},
 	}
-}
-
-func (p *distSlicePool) get() []float64 {
-	if len(p.pool) == 0 {
-		s := make([]float64, p.size)
-		for i := range s {
-			s[i] = HugeDistanceMs
-		}
-		return s
+	parentPool = sync.Pool{
+		New: func() interface{} {
+			return make([]int, 0, 10240)
+		},
 	}
-	s := p.pool[len(p.pool)-1]
-	p.pool = p.pool[:len(p.pool)-1]
+	visitedPool = sync.Pool{
+		New: func() interface{} {
+			return make([]uint8, 0, 10240)
+		},
+	}
+	heapPool = sync.Pool{
+		New: func() interface{} {
+			return make([]HeapNode, 0, 2048)
+		},
+	}
+	resultPool = sync.Pool{
+		New: func() interface{} {
+			return make([]int, 0, 128)
+		},
+	}
+)
+
+func getDistSlice(n int) []float64 {
+	s := distPool.Get().([]float64)
+	if cap(s) < n {
+		distPool.Put(s)
+		s = make([]float64, n)
+	} else {
+		s = s[:n]
+	}
 	for i := range s {
 		s[i] = HugeDistanceMs
 	}
 	return s
 }
 
-func (p *distSlicePool) put(s []float64) {
-	if len(p.pool) < 2048 {
-		p.pool = append(p.pool, s)
-	}
+func putDistSlice(s []float64) {
+	distPool.Put(s)
 }
 
-type parentSlicePool struct {
-	pool [][]int
-	size int
-}
-
-func newParentSlicePool(size int) *parentSlicePool {
-	return &parentSlicePool{
-		pool: make([][]int, 0, 1024),
-		size: size,
-	}
-}
-
-func (p *parentSlicePool) get() []int {
-	var s []int
-	if len(p.pool) == 0 {
-		s = make([]int, p.size)
+func getParentSlice(n int) []int {
+	s := parentPool.Get().([]int)
+	if cap(s) < n {
+		parentPool.Put(s)
+		s = make([]int, n)
 	} else {
-		s = p.pool[len(p.pool)-1]
-		p.pool = p.pool[:len(p.pool)-1]
+		s = s[:n]
 	}
 	for i := range s {
 		s[i] = -1
@@ -126,31 +119,17 @@ func (p *parentSlicePool) get() []int {
 	return s
 }
 
-func (p *parentSlicePool) put(s []int) {
-	if len(p.pool) < 2048 {
-		p.pool = append(p.pool, s)
-	}
+func putParentSlice(s []int) {
+	parentPool.Put(s)
 }
 
-type visitedSlicePool struct {
-	pool [][]uint8
-	size int
-}
-
-func newVisitedSlicePool(size int) *visitedSlicePool {
-	return &visitedSlicePool{
-		pool: make([][]uint8, 0, 1024),
-		size: size,
-	}
-}
-
-func (p *visitedSlicePool) get() []uint8 {
-	var s []uint8
-	if len(p.pool) == 0 {
-		s = make([]uint8, p.size)
+func getVisitedSlice(n int) []uint8 {
+	s := visitedPool.Get().([]uint8)
+	if cap(s) < n {
+		visitedPool.Put(s)
+		s = make([]uint8, n)
 	} else {
-		s = p.pool[len(p.pool)-1]
-		p.pool = p.pool[:len(p.pool)-1]
+		s = s[:n]
 	}
 	for i := range s {
 		s[i] = 0
@@ -158,19 +137,16 @@ func (p *visitedSlicePool) get() []uint8 {
 	return s
 }
 
-func (p *visitedSlicePool) put(s []uint8) {
-	if len(p.pool) < 2048 {
-		p.pool = append(p.pool, s)
-	}
+func putVisitedSlice(s []uint8) {
+	visitedPool.Put(s)
+}
+
+type Router struct {
+	g *topology.Graph
 }
 
 func NewRouter(g *topology.Graph) *Router {
-	return &Router{
-		g:           g,
-		distPool:    newDistSlicePool(g.SatCount),
-		parentPool:  newParentSlicePool(g.SatCount),
-		visitedPool: newVisitedSlicePool(g.SatCount),
-	}
+	return &Router{g: g}
 }
 
 func (r *Router) SetGraph(g *topology.Graph) {
@@ -204,14 +180,15 @@ func (r *Router) computeAStar(srcIdx, dstIdx int, preferMinHops bool, alphaHopsM
 		}
 	}
 
-	dist := r.distPool.get()
-	defer r.distPool.put(dist)
-	parent := r.parentPool.get()
-	defer r.parentPool.put(parent)
-	visited := r.visitedPool.get()
-	defer r.visitedPool.put(visited)
+	dist := getDistSlice(n)
+	defer putDistSlice(dist)
+	parent := getParentSlice(n)
+	defer putParentSlice(parent)
+	visited := getVisitedSlice(n)
+	defer putVisitedSlice(visited)
 
-	pq := PriorityQueue{items: make([]HeapNode, 0, n/10)}
+	heapStorage := heapPool.Get().([]HeapNode)
+	pq := PriorityQueue{items: heapStorage[:0]}
 	heap.Init(&pq)
 
 	seq := uint64(0)
@@ -221,7 +198,6 @@ func (r *Router) computeAStar(srcIdx, dstIdx int, preferMinHops bool, alphaHopsM
 		SatIndex:  srcIdx,
 		F:         h0,
 		G:         0,
-		Hops:      0,
 		InsertSeq: seq,
 	})
 	seq++
@@ -244,8 +220,6 @@ func (r *Router) computeAStar(srcIdx, dstIdx int, preferMinHops bool, alphaHopsM
 		}
 
 		currentG := node.G
-		currentHops := node.Hops
-
 		if currentG > dist[u]+1e-9 {
 			continue
 		}
@@ -266,7 +240,6 @@ func (r *Router) computeAStar(srcIdx, dstIdx int, preferMinHops bool, alphaHopsM
 					SatIndex:  v,
 					F:         newG + h,
 					G:         newG,
-					Hops:      currentHops + 1,
 					InsertSeq: seq,
 				})
 				seq++
@@ -274,11 +247,13 @@ func (r *Router) computeAStar(srcIdx, dstIdx int, preferMinHops bool, alphaHopsM
 		}
 	}
 
+	heapPool.Put(pq.items[:0])
+
 	if dist[dstIdx] >= HugeDistanceMs-1 {
 		return RouteResult{Found: false}
 	}
 
-	return r.reconstructPath(srcIdx, dstIdx, parent, alphaHopsMs)
+	return r.reconstructPath(srcIdx, dstIdx, parent)
 }
 
 func (r *Router) computeDijkstra(srcIdx, dstIdx int, preferMinHops bool, alphaHopsMs float64) RouteResult {
@@ -300,14 +275,15 @@ func (r *Router) computeDijkstra(srcIdx, dstIdx int, preferMinHops bool, alphaHo
 		}
 	}
 
-	dist := r.distPool.get()
-	defer r.distPool.put(dist)
-	parent := r.parentPool.get()
-	defer r.parentPool.put(parent)
-	visited := r.visitedPool.get()
-	defer r.visitedPool.put(visited)
+	dist := getDistSlice(n)
+	defer putDistSlice(dist)
+	parent := getParentSlice(n)
+	defer putParentSlice(parent)
+	visited := getVisitedSlice(n)
+	defer putVisitedSlice(visited)
 
-	pq := PriorityQueue{items: make([]HeapNode, 0, n/10)}
+	heapStorage := heapPool.Get().([]HeapNode)
+	pq := PriorityQueue{items: heapStorage[:0]}
 	heap.Init(&pq)
 
 	seq := uint64(0)
@@ -316,7 +292,6 @@ func (r *Router) computeDijkstra(srcIdx, dstIdx int, preferMinHops bool, alphaHo
 		SatIndex:  srcIdx,
 		F:         0,
 		G:         0,
-		Hops:      0,
 		InsertSeq: seq,
 	})
 	seq++
@@ -357,7 +332,6 @@ func (r *Router) computeDijkstra(srcIdx, dstIdx int, preferMinHops bool, alphaHo
 					SatIndex:  v,
 					F:         newG,
 					G:         newG,
-					Hops:      node.Hops + 1,
 					InsertSeq: seq,
 				})
 				seq++
@@ -365,40 +339,50 @@ func (r *Router) computeDijkstra(srcIdx, dstIdx int, preferMinHops bool, alphaHo
 		}
 	}
 
+	heapPool.Put(pq.items[:0])
+
 	if dist[dstIdx] >= HugeDistanceMs-1 {
 		return RouteResult{Found: false}
 	}
 
-	return r.reconstructPath(srcIdx, dstIdx, parent, alphaHopsMs)
+	return r.reconstructPath(srcIdx, dstIdx, parent)
 }
 
-func (r *Router) reconstructPath(srcIdx, dstIdx int, parent []int, alphaHopsMs float64) RouteResult {
+func (r *Router) reconstructPath(srcIdx, dstIdx int, parent []int) RouteResult {
 	g := r.g
-	path := make([]int, 0, 64)
+
+	pathBack := resultPool.Get().([]int)
+	pathBack = pathBack[:0]
+
 	cur := dstIdx
-	for cur != -1 {
-		path = append(path, cur)
+	depth := 0
+	for cur != -1 && depth < 4096 {
+		pathBack = append(pathBack, cur)
 		if cur == srcIdx {
 			break
 		}
 		cur = parent[cur]
+		depth++
 	}
 
-	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
-		path[i], path[j] = path[j], path[i]
+	pathLen := len(pathBack)
+	path := make([]int, pathLen)
+	for i := 0; i < pathLen; i++ {
+		path[i] = pathBack[pathLen-1-i]
 	}
+	resultPool.Put(pathBack[:0])
 
 	result := RouteResult{
 		Found:          true,
 		PathSatIndices: path,
-		PathSatIDs:     make([]uint64, len(path)),
-		TotalHops:      len(path) - 1,
+		PathSatIDs:     make([]uint64, pathLen),
+		TotalHops:      pathLen - 1,
 	}
 
-	linkDistances := make([]float64, len(path))
-	linkDelays := make([]float64, len(path))
+	linkDistances := make([]float64, pathLen)
+	linkDelays := make([]float64, pathLen)
 
-	for i := 0; i < len(path); i++ {
+	for i := 0; i < pathLen; i++ {
 		result.PathSatIDs[i] = g.SatIndexToID[path[i]]
 	}
 
@@ -406,7 +390,7 @@ func (r *Router) reconstructPath(srcIdx, dstIdx int, parent []int, alphaHopsMs f
 	links := g.Links
 	positions := g.Positions
 
-	for i := 1; i < len(path); i++ {
+	for i := 1; i < pathLen; i++ {
 		prev := path[i-1]
 		curr := path[i]
 		found := false
@@ -434,7 +418,6 @@ func (r *Router) reconstructPath(srcIdx, dstIdx int, parent []int, alphaHopsMs f
 			result.TotalPropagationDelayMs += delayMs
 		}
 	}
-	_ = alphaHopsMs
 
 	result.LinkDistancesKm = linkDistances
 	result.LinkDelaysMs = linkDelays
