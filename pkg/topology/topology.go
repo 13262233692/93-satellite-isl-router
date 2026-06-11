@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	DefaultMaxLaserLinkKm     = 5000.0
-	DefaultOcclusionMarginKm  = 50.0
-	DefaultGridCellSizeKm     = 800.0
-	DefaultMaxLinksPerSat     = 20
+	DefaultMaxLaserLinkKm           = 5000.0
+	DefaultOcclusionMarginKm        = 50.0
+	DefaultGridCellSizeKm           = 800.0
+	DefaultMaxLinksPerSat           = 20
+	DefaultMaxRadialVelocityKms     = 3.0
 )
 
 type DirectedLink struct {
@@ -25,18 +26,20 @@ type DirectedLink struct {
 }
 
 type TopologyConfig struct {
-	MaxLaserLinkKm    float64
-	OcclusionMarginKm float64
-	GridCellSizeKm    float64
-	MaxLinksPerSat    int
+	MaxLaserLinkKm        float64
+	OcclusionMarginKm     float64
+	GridCellSizeKm        float64
+	MaxLinksPerSat        int
+	MaxRadialVelocityKms  float64
 }
 
 func DefaultTopologyConfig() TopologyConfig {
 	return TopologyConfig{
-		MaxLaserLinkKm:    DefaultMaxLaserLinkKm,
-		OcclusionMarginKm: DefaultOcclusionMarginKm,
-		GridCellSizeKm:    DefaultGridCellSizeKm,
-		MaxLinksPerSat:    DefaultMaxLinksPerSat,
+		MaxLaserLinkKm:       DefaultMaxLaserLinkKm,
+		OcclusionMarginKm:    DefaultOcclusionMarginKm,
+		GridCellSizeKm:       DefaultGridCellSizeKm,
+		MaxLinksPerSat:       DefaultMaxLinksPerSat,
+		MaxRadialVelocityKms: DefaultMaxRadialVelocityKms,
 	}
 }
 
@@ -47,6 +50,7 @@ type Graph struct {
 	SatIDToIndex map[uint64]int
 	SatIndexToID []uint64
 	Positions    []ephemeris.ECEFPosition
+	Velocities   []ephemeris.ECEFVelocity
 	BuildTimeNs  int64
 }
 
@@ -117,12 +121,14 @@ func (tb *TopologyBuilder) Build(snap *ephemeris.PositionSnapshot, buildTimeNs i
 		SatIDToIndex: make(map[uint64]int, satCount),
 		SatIndexToID: make([]uint64, satCount),
 		Positions:    make([]ephemeris.ECEFPosition, satCount),
+		Velocities:   make([]ephemeris.ECEFVelocity, satCount),
 		BuildTimeNs:  buildTimeNs,
 	}
 	for id, idx := range snap.IDToIndex {
 		g.SatIDToIndex[id] = idx
 		g.SatIndexToID[idx] = id
 		g.Positions[idx] = snap.Positions[idx]
+		g.Velocities[idx] = snap.Velocities[idx]
 	}
 
 	cellSize := tb.config.GridCellSizeKm
@@ -134,17 +140,20 @@ func (tb *TopologyBuilder) Build(snap *ephemeris.PositionSnapshot, buildTimeNs i
 	}
 
 	maxDistSq := tb.config.MaxLaserLinkKm * tb.config.MaxLaserLinkKm
+	maxRadVel := tb.config.MaxRadialVelocityKms
+	maxRadVelSq := maxRadVel * maxRadVel
 
 	var pairs []undirectedPair
 	var pairsMu sync.Mutex
 
-	processPair := func(i1, i2 int, p1, p2 ephemeris.ECEFPosition) {
+	processPair := func(i1, i2 int, p1, p2 ephemeris.ECEFPosition, v1, v2 ephemeris.ECEFVelocity) {
 		if i1 == i2 {
 			return
 		}
 		if i1 > i2 {
 			i1, i2 = i2, i1
 			p1, p2 = p2, p1
+			v1, v2 = v2, v1
 		}
 		dx := p1.XKm - p2.XKm
 		dy := p1.YKm - p2.YKm
@@ -154,6 +163,13 @@ func (tb *TopologyBuilder) Build(snap *ephemeris.PositionSnapshot, buildTimeNs i
 			return
 		}
 		if IsLineBlockedByEarth(p1, p2, tb.config.OcclusionMarginKm) {
+			return
+		}
+		rvx := v2.VxKmS - v1.VxKmS
+		rvy := v2.VyKmS - v1.VyKmS
+		rvz := v2.VzKmS - v1.VzKmS
+		dot := rvx*dx + rvy*dy + rvz*dz
+		if dot*dot > maxRadVelSq*distSq {
 			return
 		}
 		distKm := math.Sqrt(distSq)
@@ -180,7 +196,7 @@ func (tb *TopologyBuilder) Build(snap *ephemeris.PositionSnapshot, buildTimeNs i
 			for b := a + 1; b < len(baseSats); b++ {
 				i1 := baseSats[a]
 				i2 := baseSats[b]
-				processPair(i1, i2, snap.Positions[i1], snap.Positions[i2])
+				processPair(i1, i2, snap.Positions[i1], snap.Positions[i2], snap.Velocities[i1], snap.Velocities[i2])
 			}
 		}
 
@@ -205,7 +221,7 @@ func (tb *TopologyBuilder) Build(snap *ephemeris.PositionSnapshot, buildTimeNs i
 						for b := 0; b < len(nSats); b++ {
 							i1 := baseSats[a]
 							i2 := nSats[b]
-							processPair(i1, i2, snap.Positions[i1], snap.Positions[i2])
+							processPair(i1, i2, snap.Positions[i1], snap.Positions[i2], snap.Velocities[i1], snap.Velocities[i2])
 						}
 					}
 				}

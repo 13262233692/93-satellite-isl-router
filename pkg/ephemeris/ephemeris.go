@@ -161,9 +161,16 @@ type ECEFPosition struct {
 	AltitudeKm float64
 }
 
+type ECEFVelocity struct {
+	VxKmS float64
+	VyKmS float64
+	VzKmS float64
+}
+
 type PositionSnapshot struct {
 	EpochUnixMs uint64
 	Positions   []ECEFPosition
+	Velocities  []ECEFVelocity
 	IDToIndex   map[uint64]int
 }
 
@@ -190,7 +197,7 @@ func solveKepler(M, e float64) float64 {
 	return E
 }
 
-func (sat *Satellite) propagate(epochSeconds float64) ECEFPosition {
+func (sat *Satellite) propagate(epochSeconds float64) (ECEFPosition, ECEFVelocity) {
 	op := sat.OrbitParams
 	M := op.MeanAnomalyRad + sat.MeanMotionRadS*epochSeconds
 	for M < 0 {
@@ -205,9 +212,16 @@ func (sat *Satellite) propagate(epochSeconds float64) ECEFPosition {
 	cosE := math.Cos(E)
 	sinE := math.Sin(E)
 	e := op.Eccentricity
+	a := op.SemimajorAxisKm
+	n := sat.MeanMotionRadS
+	sqrt1me2 := math.Sqrt(1 - e*e)
 
-	xOrb := op.SemimajorAxisKm * (cosE - e)
-	yOrb := op.SemimajorAxisKm * math.Sqrt(1-e*e) * sinE
+	xOrb := a * (cosE - e)
+	yOrb := a * sqrt1me2 * sinE
+
+	denom := 1.0 - e*cosE
+	vxOrb := -a * n * sinE / denom
+	vyOrb := a * n * sqrt1me2 * cosE / denom
 
 	cosRAAN := math.Cos(op.RAANRad)
 	sinRAAN := math.Sin(op.RAANRad)
@@ -216,19 +230,34 @@ func (sat *Satellite) propagate(epochSeconds float64) ECEFPosition {
 	cosW := math.Cos(op.ArgOfPerigeeRad)
 	sinW := math.Sin(op.ArgOfPerigeeRad)
 
-	x := (cosRAAN*cosW - sinRAAN*sinW*cosI) * xOrb + (-cosRAAN*sinW - sinRAAN*cosW*cosI) * yOrb
-	y := (sinRAAN*cosW + cosRAAN*sinW*cosI) * xOrb + (-sinRAAN*sinW + cosRAAN*cosW*cosI) * yOrb
-	z := (sinW * sinI) * xOrb + (cosW * sinI) * yOrb
+	r11 := cosRAAN*cosW - sinRAAN*sinW*cosI
+	r12 := -cosRAAN*sinW - sinRAAN*cosW*cosI
+	r21 := sinRAAN*cosW + cosRAAN*sinW*cosI
+	r22 := -sinRAAN*sinW + cosRAAN*cosW*cosI
+	r31 := sinW * sinI
+	r32 := cosW * sinI
+
+	x := r11*xOrb + r12*yOrb
+	y := r21*xOrb + r22*yOrb
+	z := r31*xOrb + r32*yOrb
+
+	vx := r11*vxOrb + r12*vyOrb
+	vy := r21*vxOrb + r22*vyOrb
+	vz := r31*vxOrb + r32*vyOrb
 
 	r := math.Sqrt(x*x + y*y + z*z)
 	alt := r - EarthRadiusKm
 
 	return ECEFPosition{
-		XKm:        x,
-		YKm:        y,
-		ZKm:        z,
-		AltitudeKm: alt,
-	}
+			XKm:        x,
+			YKm:        y,
+			ZKm:        z,
+			AltitudeKm: alt,
+		}, ECEFVelocity{
+			VxKmS: vx,
+			VyKmS: vy,
+			VzKmS: vz,
+		}
 }
 
 func (em *EphemerisModel) ComputeAllPositions(epochUnixMs uint64) *PositionSnapshot {
@@ -241,15 +270,30 @@ func (em *EphemerisModel) ComputeAllPositions(epochUnixMs uint64) *PositionSnaps
 	snapshot := &PositionSnapshot{
 		EpochUnixMs: epochUnixMs,
 		Positions:   make([]ECEFPosition, len(sats)),
+		Velocities:  make([]ECEFVelocity, len(sats)),
 		IDToIndex:   make(map[uint64]int, len(sats)),
 	}
 
 	for i, sat := range sats {
-		snapshot.Positions[i] = sat.propagate(epochSeconds)
+		snapshot.Positions[i], snapshot.Velocities[i] = sat.propagate(epochSeconds)
 		snapshot.IDToIndex[sat.ID] = i
 	}
 
 	return snapshot
+}
+
+func RelativeRadialVelocityKms(p1, p2 ECEFPosition, v1, v2 ECEFVelocity) float64 {
+	dx := p2.XKm - p1.XKm
+	dy := p2.YKm - p1.YKm
+	dz := p2.ZKm - p1.ZKm
+	dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+	if dist < 1e-10 {
+		return 0.0
+	}
+	rvx := v2.VxKmS - v1.VxKmS
+	rvy := v2.VyKmS - v1.VyKmS
+	rvz := v2.VzKmS - v1.VzKmS
+	return (rvx*dx + rvy*dy + rvz*dz) / dist
 }
 
 func DistanceKm(p1, p2 ECEFPosition) float64 {

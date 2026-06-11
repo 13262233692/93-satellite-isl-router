@@ -35,6 +35,7 @@ func main() {
 	planes := flag.Int("planes", 100, "Number of orbit planes")
 	satsPerPlane := flag.Int("spp", 100, "Satellites per plane")
 	maxLinksPerSat := flag.Int("maxlinks", 20, "Max directed links per satellite")
+	maxRadVel := flag.Float64("radvel", 3.0, "Max radial velocity km/s (Doppler shift cutoff)")
 	runBenchmark := flag.Bool("bench", false, "Run internal benchmark and exit")
 
 	flag.Parse()
@@ -52,6 +53,7 @@ func main() {
 	topoCfg := topology.DefaultTopologyConfig()
 	topoCfg.MaxLaserLinkKm = *maxLinkKm
 	topoCfg.MaxLinksPerSat = *maxLinksPerSat
+	topoCfg.MaxRadialVelocityKms = *maxRadVel
 
 	mgrCfg := snapshot.DefaultManagerConfig()
 	mgrCfg.RefreshIntervalSec = *refreshSec
@@ -62,6 +64,8 @@ func main() {
 	fmt.Printf("Initializing constellation: %d satellites, %d planes, %d sats/plane, %.0fkm alt, %.1f° inc\n",
 		ephCfg.TotalSatellites, ephCfg.NumOrbitPlanes, ephCfg.SatsPerPlane,
 		ephCfg.AltitudeKm, ephCfg.InclinationDeg)
+	fmt.Printf("Physical constraints: max link=%.0f km, max radial velocity=%.2f km/s (Doppler PLL cutoff)\n",
+		*maxLinkKm, *maxRadVel)
 
 	snapMgr := snapshot.NewManager(mgrCfg)
 
